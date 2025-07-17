@@ -124,9 +124,11 @@ class I3D_IO_OT_export(Operator, ExportHelper):
 
     binarize_i3d: BoolProperty(
         name="Binarize i3d",
-        description="Binarizes i3d after Export. "
-                    "Needs to have path to 3dConverter.exe set in Addon Preferences",
-        default=False
+        description=(
+            "Converts the exported .i3d file to binary format using i3dConverter.exe.\n"
+            "Requires the converter path to be set in Addon Preferences"
+        ),
+        default=True
     )
 
     keep_collections_as_transformgroups: BoolProperty(
