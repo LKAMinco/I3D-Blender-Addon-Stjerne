@@ -1,24 +1,23 @@
 from __future__ import annotations  # Enables python 4.0 annotation typehints fx. class self-referencing
+from pathlib import Path
 from typing import List
 import sys
 import subprocess
 import time
 import logging
 import bpy
-from bpy_extras.io_utils import (
-    axis_conversion
-)
-
+from bpy_extras.io_utils import axis_conversion
+from addon_utils import module_bl_info
 from . import (
     debugging,
     xml_i3d
 )
-
 from .utility import (BlenderObject, sort_blender_objects_by_outliner_ordering, get_fs_data_path)
 from .i3d import I3D
 from .node_classes.node import SceneGraphNode
 from .node_classes.skinned_mesh import SkinnedMeshRootNode
 from .node_classes.merge_group import MergeGroup
+from .ui.dds_exporter import export_motion_path_array
 
 logger = logging.getLogger(__name__)
 logger.debug(f"Loading: {__name__}")
@@ -43,7 +42,7 @@ def export_blend_to_i3d(operator, filepath: str, axis_forward, axis_up, settings
     # Output info about the addon
     debugging.addon_console_handler.setLevel(logging.INFO)
     logger.info(f"Blender version is: {bpy.app.version_string}")
-    logger.info(f"I3D Exporter version is: {sys.modules[__package__].__version__}")
+    logger.info(f"I3D Exporter version is: {module_bl_info(sys.modules[__package__])['version']}")
     logger.info(f"Exporting to {filepath}")
 
     if operator.verbose_output:
@@ -212,6 +211,9 @@ def _add_object_to_i3d(i3d: I3D, obj: BlenderObject, parent: SceneGraphNode = No
         _process_collection_objects(i3d, obj, node)
         return  # Collections use a different hierarchy and are handled separately in _process_collection_objects
 
+    if obj.i3d_motion_path_array.enabled:
+        export_motion_path_array(obj)
+
     # Check if object should be excluded from export (including its children)
     if obj.i3d_attributes.exclude_from_export:
         logger.info(f"Skipping [{obj.name}] and its children. Excluded from export.")
@@ -352,6 +354,13 @@ def _binarize_i3d(filepath: str, operator, logger: logging.Logger):
     if not (converter_path := bpy.context.preferences.addons[__package__].preferences.i3d_converter_path):
         logger.error("No i3dConverter path set in preferences. Skipping binarization.")
         return
+    converter_exe_path = Path(converter_path)
+    if not converter_exe_path.exists():
+        logger.error(f"i3dConverter.exe path does not exist: {converter_exe_path!r}. Skipping binarization.")
+        return
+    if not converter_exe_path.is_file():
+        logger.error(f"i3dConverter.exe path is not a file: {converter_exe_path!r}. Skipping binarization.")
+        return
     if not (game_path := get_fs_data_path(as_path=True).parent):
         logger.error("No game data path set in preferences. Skipping binarization.")
         return
@@ -360,28 +369,54 @@ def _binarize_i3d(filepath: str, operator, logger: logging.Logger):
     try:
         conversion_result = subprocess.run(
             args=[
-                str(converter_path),
+                str(converter_exe_path),
                 '-in', str(filepath),
                 '-out', str(filepath),
                 '-gamePath', f"{game_path}/"
             ],
             timeout=BINARIZER_TIMEOUT_IN_SECONDS,
-            check=True,
+            check=False,  # inspect stdout even on non-zero exit code
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT
         )
+        raw = conversion_result.stdout or ""
+        lines = [ln.rstrip("\r\n") for ln in raw.splitlines() if ln.strip()]
+
+        # Some lines could be repeated multiple times, collapse them
+        collapsed: list[str] = []
+        last = None
+        for ln in lines:
+            if ln != last:
+                collapsed.append(ln)
+            last = ln
+
+        _UNIMPORTANT = ("render system", "driver: null", "nullconsoledevice initialized", "i3d contains non-binary")
+        def _emit(line: str) -> None:
+            msg = line.rstrip()
+            low = msg.lower().strip()
+            if any(s in low for s in _UNIMPORTANT):
+                return
+            if low.startswith("error:"):
+                logger.error(f"  {msg}", stacklevel=2)
+            elif low.startswith("warning:"):
+                logger.warning(msg, stacklevel=2)
+            else:
+                logger.info(f"   {msg}", stacklevel=2)
+        for line in collapsed:
+            _emit(line)
+
+        if conversion_result.returncode != 0:  # Non-zero exit
+            operator.report({'ERROR'}, "Binarization failed. See log for details.")
+            return
+        logger.info(f'Finished binarization of "{filepath}"')
+        operator.report({'INFO'}, "Binarization completed successfully.")
+
     except FileNotFoundError:
-        logger.error(f"Invalid path to i3dConverter.exe: {converter_path!r}")
+        logger.error(f"Invalid path to i3dConverter.exe: {converter_exe_path!r}")
     except subprocess.TimeoutExpired as e:
         logger.error(f"i3dConverter.exe timed out after {BINARIZER_TIMEOUT_IN_SECONDS} seconds. Output: {e.output!r}")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"i3dConverter.exe failed to run with error code: {e.returncode}")
-    else:
-        error_messages = [f"\t{line}" for line in conversion_result.stdout.split('\n') if line.startswith("Error:")]
-        if error_messages:
-            logger.error("i3dConverter.exe produced errors:\n" + '\n'.join(error_messages))
-            operator.report({'ERROR'}, "i3dConverter.exe reported errors. See log for details.")
-        else:
-            logger.info(f'Finished binarization of "{filepath}"')
-            operator.report({'INFO'}, "Binarization completed successfully.")
+        operator.report({'ERROR'}, "Binarization timed out. See log for details.")
+    except Exception:
+        logger.exception("Unexpected error while running i3dConverter.exe")
+        operator.report({'ERROR'}, "Binarization crashed. See log for details.")

@@ -43,6 +43,14 @@ def vector_compare(a: mathutils.Vector, b: mathutils.Vector, epsilon: float = 0.
     return True
 
 
+def ext_user_dir(subpath: str = "", create: bool = True) -> Path:
+    """
+    Returns the extension's per-user writable directory (or a subdir).
+    Creates missing directories when create=True.
+    """
+    return Path(bpy.utils.extension_path_user(__package__, path=subpath, create=create))
+
+
 def as_fs_relative_path(filepath: str) -> Path:
     """
     Checks if a filepath is relative to the FS data directory
@@ -117,7 +125,7 @@ with the use of a regex as detailed in this answer on stackoverflow https://stac
 
 
 def sort_blender_objects_by_outliner_ordering(objects: List[BlenderObject]) -> List[BlenderObject]:
-    return sorted(objects, key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split('(\d+)', s.name)])
+    return sorted(objects, key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s.name)])
 
 
 def get_fs_data_path(as_path: bool = False) -> str | Path:
